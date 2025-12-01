@@ -25,7 +25,7 @@ const BannerSchema = new mongoose.Schema(
     },
     type: {
       type: String,
-      enum: ["slider-full", "slider-part"],
+      enum: ["slider-full", "slider-part-center", "slider-part-right", "slider-part"],
       default: "slider-full",
     },
     priority: {
