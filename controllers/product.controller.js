@@ -468,7 +468,7 @@ const getTopSellingProductsByCategory = async (req, res) => {
       .skip(skip)
       .limit(limit)
       .select(
-        "name description price discountPercent sku mainImage quantitySold slug isSpecial createdAt starAverage numberOfReviews"
+        "name description price discountPercent sku mainImage quantitySold slug isSpecial createdAt starAverage numberOfReviews galleryImages"
       )
       .populate("category", "name")
       .populate("subCategory", "name")
