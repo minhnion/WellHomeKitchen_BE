@@ -5,10 +5,8 @@ FROM node:18-alpine
 WORKDIR /app
 
 # ===== Copy package files first (for better cache) =====
-COPY package.json package-lock.json ./
-
-# ===== Install dependencies (production only) =====
-RUN npm ci --omit=dev
+COPY package.json ./
+RUN npm install --omit=dev
 
 # ===== Copy source code =====
 COPY . .
