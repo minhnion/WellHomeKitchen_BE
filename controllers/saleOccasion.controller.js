@@ -113,7 +113,9 @@ const getSaleProducts = async (req, res) => {
     saleOccasions.forEach((so) => {
       so.products.forEach((item) => {
         const pid = item.productId.toString();
-        if (!saleMap.has(pid)) {
+        const existing = saleMap.get(pid);
+
+        if (!existing || item.salePercent > existing.salePercent) {
           saleMap.set(pid, {
             saleQuantity: item.saleQuantity,
             salePercent: item.salePercent,
@@ -121,6 +123,7 @@ const getSaleProducts = async (req, res) => {
             saleEnd: so.endAt,
           });
         }
+
       });
     });
 
@@ -179,6 +182,34 @@ const getSaleProducts = async (req, res) => {
     );
   }
 };
+
+const getAllSaleOccasions = async (req, res) => {
+  try {
+    const sales = await SaleOccasion.find()
+      .populate({
+        path: "products.productId",
+        select: "name slug price mainImage category brand",
+      })
+      .sort({ startAt: -1 })
+      .lean();
+
+    return sendSuccessResponse(
+      res,
+      StatusCodes.OK,
+      "Lấy danh sách tất cả đợt khuyến mãi thành công",
+      sales
+    );
+  } catch (error) {
+    logError(error, req);
+    return sendErrorResponse(
+      res,
+      StatusCodes.INTERNAL_SERVER_ERROR,
+      "Lỗi hệ thống",
+      error
+    );
+  }
+};
+
 
 const createSaleOccasion = async (req, res) => {
   try {
@@ -259,8 +290,246 @@ const createSaleOccasion = async (req, res) => {
   }
 };
 
+const updateSaleOccasion = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { startAt, endAt, products } = req.body;
+
+    //  Validate sale ID
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return sendErrorResponse(
+        res,
+        StatusCodes.BAD_REQUEST,
+        "ID chương trình khuyến mãi không hợp lệ"
+      );
+    }
+
+    const sale = await SaleOccasion.findById(id);
+    if (!sale) {
+      return sendErrorResponse(
+        res,
+        StatusCodes.NOT_FOUND,
+        "Không tìm thấy chương trình khuyến mãi"
+      );
+    }
+
+    const now = new Date();
+
+    //  Sale đã kết thúc → cấm sửa
+    if (now > sale.endAt) {
+      return sendErrorResponse(
+        res,
+        StatusCodes.BAD_REQUEST,
+        "Không thể chỉnh sửa chương trình khuyến mãi đã kết thúc"
+      );
+    }
+
+    //  Sale đang diễn ra → cấm sửa startAt
+    if (now >= sale.startAt && startAt !== undefined) {
+      return sendErrorResponse(
+        res,
+        StatusCodes.BAD_REQUEST,
+        "Không thể thay đổi thời gian bắt đầu khi khuyến mãi đang diễn ra"
+      );
+    }
+
+    //  Body rỗng
+    if (
+      startAt === undefined &&
+      endAt === undefined &&
+      products === undefined
+    ) {
+      return sendErrorResponse(
+        res,
+        StatusCodes.BAD_REQUEST,
+        "Không có dữ liệu để cập nhật"
+      );
+    }
+
+    // 5️⃣ Validate & merge thời gian
+    const startDate = startAt ? new Date(startAt) : sale.startAt;
+    const endDate = endAt ? new Date(endAt) : sale.endAt;
+
+    if (
+      isNaN(startDate.getTime()) ||
+      isNaN(endDate.getTime()) ||
+      endDate <= startDate
+    ) {
+      return sendErrorResponse(
+        res,
+        StatusCodes.BAD_REQUEST,
+        "Thời gian khuyến mãi không hợp lệ"
+      );
+    }
+
+    //  Update products (partial update)
+    if (products !== undefined) {
+      if (!Array.isArray(products) || products.length === 0) {
+        return sendErrorResponse(
+          res,
+          StatusCodes.BAD_REQUEST,
+          "Danh sách sản phẩm không hợp lệ"
+        );
+      }
+
+      for (const item of products) {
+        const { productId, saleQuantity, salePercent } = item;
+
+        if (!mongoose.Types.ObjectId.isValid(productId)) {
+          return sendErrorResponse(
+            res,
+            StatusCodes.BAD_REQUEST,
+            "productId không hợp lệ"
+          );
+        }
+
+        if (saleQuantity === undefined && salePercent === undefined) {
+          return sendErrorResponse(
+            res,
+            StatusCodes.BAD_REQUEST,
+            "Phải có ít nhất saleQuantity hoặc salePercent"
+          );
+        }
+
+        if (saleQuantity !== undefined) {
+          if (typeof saleQuantity !== "number" || saleQuantity < 0) {
+            return sendErrorResponse(
+              res,
+              StatusCodes.BAD_REQUEST,
+              "saleQuantity không hợp lệ"
+            );
+          }
+        }
+
+        if (salePercent !== undefined) {
+          if (
+            typeof salePercent !== "number" ||
+            salePercent < 0 ||
+            salePercent > 100
+          ) {
+            return sendErrorResponse(
+              res,
+              StatusCodes.BAD_REQUEST,
+              "salePercent không hợp lệ"
+            );
+          }
+        }
+
+        const idx = sale.products.findIndex(
+          (p) => p.productId.toString() === productId
+        );
+
+        if (idx === -1) {
+          return sendErrorResponse(
+            res,
+            StatusCodes.BAD_REQUEST,
+            `Sản phẩm không tồn tại trong chương trình`
+          );
+        }
+
+        // chỉ update field được gửi
+        if (saleQuantity !== undefined) {
+          sale.products[idx].saleQuantity = saleQuantity;
+        }
+
+        if (salePercent !== undefined) {
+          sale.products[idx].salePercent = salePercent;
+        }
+      }
+    }
+
+    // Gán thời gian
+    if (startAt !== undefined) sale.startAt = startDate;
+    if (endAt !== undefined) sale.endAt = endDate;
+
+    await sale.save();
+
+    return sendSuccessResponse(
+      res,
+      StatusCodes.OK,
+      "Cập nhật chương trình khuyến mãi thành công",
+      sale
+    );
+  } catch (error) {
+    logError(error, req);
+    return sendErrorResponse(
+      res,
+      StatusCodes.INTERNAL_SERVER_ERROR,
+      "Lỗi hệ thống",
+      error
+    );
+  }
+};
+
+const deleteSaleOccasion = async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    //  Validate sale ID
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return sendErrorResponse(
+        res,
+        StatusCodes.BAD_REQUEST,
+        "ID chương trình khuyến mãi không hợp lệ"
+      );
+    }
+
+    const sale = await SaleOccasion.findById(id);
+    if (!sale) {
+      return sendErrorResponse(
+        res,
+        StatusCodes.NOT_FOUND,
+        "Không tìm thấy chương trình khuyến mãi"
+      );
+    }
+
+    const now = new Date();
+
+    //  Đang diễn ra → cấm xoá
+    if (now >= sale.startAt && now <= sale.endAt) {
+      return sendErrorResponse(
+        res,
+        StatusCodes.BAD_REQUEST,
+        "Không thể xoá chương trình khuyến mãi đang diễn ra"
+      );
+    }
+
+    //  Đã kết thúc → cấm xoá
+    if (now > sale.endAt) {
+      return sendErrorResponse(
+        res,
+        StatusCodes.BAD_REQUEST,
+        "Không thể xoá chương trình khuyến mãi đã kết thúc"
+      );
+    }
+
+    // Chưa bắt đầu → cho xoá
+    await SaleOccasion.findByIdAndDelete(id);
+
+    return sendSuccessResponse(
+      res,
+      StatusCodes.OK,
+      "Xoá chương trình khuyến mãi thành công"
+    );
+  } catch (error) {
+    logError(error, req);
+    return sendErrorResponse(
+      res,
+      StatusCodes.INTERNAL_SERVER_ERROR,
+      "Lỗi hệ thống",
+      error
+    );
+  }
+};
+
+
+
+
 export default {
   getSaleProducts,
+  getAllSaleOccasions,
   createSaleOccasion,
   getSaleCategories,
+  updateSaleOccasion,
+  deleteSaleOccasion
 };
