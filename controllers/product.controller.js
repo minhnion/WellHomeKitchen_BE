@@ -9,6 +9,7 @@ import {
 import logError from "../utils/loggerError.js";
 import { createSlug } from "../utils/helpers.js";
 import { StatusCodes } from "http-status-codes";
+import { applySaleToProducts } from "../utils/applySaleToProducts.js";
 
 const createProduct = async (req, res) => {
   try {
@@ -113,7 +114,7 @@ const getAllProducts = async (req, res) => {
       productsQuery.exec(),
       totalProductsQuery.exec(),
     ]);
-
+    const productsWithSale = await applySaleToProducts(products);
     const totalPages = Math.ceil(totalProducts / limit);
     const paginationDetails = {
       currentPage: page,
@@ -125,7 +126,7 @@ const getAllProducts = async (req, res) => {
       res,
       StatusCodes.OK,
       "Lấy danh sách sản phẩm thành công",
-      products,
+      productsWithSale,
       paginationDetails
     );
   } catch (error) {
@@ -293,12 +294,13 @@ const getProductById = async (req, res) => {
     if (!product) {
       return sendNotFoundResponse(res, "Không tìm thấy sản phẩm");
     }
+    const [productsWithSale] = await applySaleToProducts([product]);
 
     return sendSuccessResponse(
       res,
       StatusCodes.OK,
       "Lấy chi tiết sản phẩm thành công",
-      product
+      productsWithSale
     );
   } catch (error) {
     logError(error, req);
@@ -323,11 +325,12 @@ const getProductBySlug = async (req, res) => {
       .populate("category", "name slug imageUrl")
       .populate("brand", "name imageUrl slug")
       .populate("subCategory", "name slug imageUrl");
+    const [productsWithSale] = await applySaleToProducts([populatedProduct]);
     return sendSuccessResponse(
       res,
       StatusCodes.OK,
       "Lấy chi tiết sản phẩm thành công",
-      populatedProduct
+      productsWithSale
     );
   } catch (error) {
     logError(error, req);
@@ -347,6 +350,7 @@ const getProductBySku = async (req, res) => {
     if (!product) {
       return sendNotFoundResponse(res, "Không tìm thấy sản phẩm");
     }
+    const [productsWithSale] = await applySaleToProducts([product]);
     sendSuccessResponse(
       res,
       StatusCodes.OK,
@@ -484,7 +488,7 @@ const getTopSellingProductsByCategory = async (req, res) => {
       productsQuery.exec(),
       totalProductsQuery.exec(),
     ]);
-
+    const productsWithSale = await applySaleToProducts(products);
     const totalPages = Math.ceil(totalProducts / limit);
     const paginationDetails = {
       currentPage: page,
@@ -497,7 +501,7 @@ const getTopSellingProductsByCategory = async (req, res) => {
       res,
       StatusCodes.OK,
       "Lấy danh sách sản phẩm bán chạy thành công",
-      products,
+      productsWithSale,
       paginationDetails
     );
   } catch (error) {
