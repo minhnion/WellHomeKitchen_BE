@@ -8,6 +8,7 @@ import {
 } from "../utils/responseUtils.js";
 import logError from "../utils/loggerError.js";
 import Product from "../models/product.model.js";
+import { createSlug } from "../utils/helpers.js";
 
 const getSaleCategories = async (req, res) => {
   try {
@@ -22,10 +23,27 @@ const getSaleCategories = async (req, res) => {
       );
     }
     const categories = await SaleOccasion.aggregate([
+      //  Chỉ lấy sale đang diễn ra
       {
-        $match: { startAt: { $lte: targetDate }, endAt: { $gte: targetDate } },
+        $match: {
+          startAt: { $lte: targetDate },
+          endAt: { $gte: targetDate },
+        },
       },
+
+      //  Nếu có nhiều sale → lấy sale có startAt gần time nhất
+      {
+        $sort: { startAt: -1 },
+      },
+
+      //  Đảm bảo chỉ lấy 1 đợt sale
+      {
+        $limit: 1,
+      },
+
+      //  Bắt đầu xử lý products
       { $unwind: "$products" },
+
       {
         $lookup: {
           from: mongoose.model("Product").collection.name,
@@ -35,7 +53,16 @@ const getSaleCategories = async (req, res) => {
         },
       },
       { $unwind: "$product" },
-      { $group: { _id: "$product.category" } },
+
+      //  Group theo category, giữ saleSlug
+      {
+        $group: {
+          _id: "$product.category",
+          saleSlug: { $first: "$slug" },
+        },
+      },
+
+      //  Lấy thông tin category
       {
         $lookup: {
           from: mongoose.model("Category").collection.name,
@@ -45,8 +72,19 @@ const getSaleCategories = async (req, res) => {
         },
       },
       { $unwind: "$category" },
-      { $project: { name: "$category.name" } },
+
+      //  Output
+      {
+        $project: {
+          _id: "$category._id",
+          name: "$category.name",
+          slug: "$category.slug",
+          saleSlug: 1,
+        },
+      },
     ]);
+
+
 
     return sendSuccessResponse(
       res,
@@ -88,42 +126,42 @@ const getSaleProducts = async (req, res) => {
       );
     }
 
-    const categoryIdObj = new mongoose.Types.ObjectId(category);
-
-    // Find all active sale occasions at the target time
-    const saleOccasions = await SaleOccasion.find({
+    //  find sale
+    const saleOccasion = await SaleOccasion.findOne({
       startAt: { $lte: targetDate },
       endAt: { $gte: targetDate },
     })
-      .select("products startAt endAt")
+      .sort({ startAt: -1 })
+      .select("name slug products startAt endAt")
       .lean();
 
-    // If no sale occasions found, return empty
-    if (!saleOccasions || saleOccasions.length === 0) {
+    if (!saleOccasion) {
       return sendSuccessResponse(
         res,
         StatusCodes.OK,
         "Không tìm thấy sản phẩm khuyến mãi nào",
-        [],
+        {
+          sale: null,
+          products: [],
+        },
         { page, limit, total: 0 }
       );
     }
 
+    // sale info tách riêng
+    const sale = {
+      name: saleOccasion.name,
+      slug: saleOccasion.slug,
+      startAt: saleOccasion.startAt,
+      endAt: saleOccasion.endAt,
+    };
+
+    // map productId → sale info
     const saleMap = new Map();
-    saleOccasions.forEach((so) => {
-      so.products.forEach((item) => {
-        const pid = item.productId.toString();
-        const existing = saleMap.get(pid);
-
-        if (!existing || item.salePercent > existing.salePercent) {
-          saleMap.set(pid, {
-            saleQuantity: item.saleQuantity,
-            salePercent: item.salePercent,
-            saleStart: so.startAt,
-            saleEnd: so.endAt,
-          });
-        }
-
+    saleOccasion.products.forEach((item) => {
+      saleMap.set(item.productId.toString(), {
+        salePercent: item.salePercent,
+        saleQuantity: item.saleQuantity,
       });
     });
 
@@ -135,32 +173,31 @@ const getSaleProducts = async (req, res) => {
       _id: { $in: productIds },
       isDelete: { $ne: true },
     };
-    if (category) {
-      filter.category = categoryIdObj;
+
+    if (category && mongoose.Types.ObjectId.isValid(category)) {
+      filter.category = new mongoose.Types.ObjectId(category);
     }
 
     const total = await Product.countDocuments(filter);
 
     const products = await Product.find(filter)
-      .select("name slug mainImage price")
+      .select("name slug mainImage price category brand")
       .skip((page - 1) * limit)
       .limit(limit)
       .lean();
 
-    const data = products.map((prod) => {
+    const productData = products.map((prod) => {
       const saleInfo = saleMap.get(prod._id.toString());
       return {
         productId: prod._id,
         name: prod.name,
         slug: prod.slug,
         mainImage: prod.mainImage,
+        price: prod.price,
         category: prod.category,
         brand: prod.brand,
-        price: prod.price,
         salePercent: saleInfo.salePercent,
         saleQuantity: saleInfo.saleQuantity,
-        saleStart: saleInfo.saleStart,
-        saleEnd: saleInfo.saleEnd,
       };
     });
 
@@ -168,7 +205,10 @@ const getSaleProducts = async (req, res) => {
       res,
       StatusCodes.OK,
       "Lấy danh sách sản phẩm khuyến mãi thành công",
-      data,
+      {
+        sale,
+        products: productData,
+      },
       { page, limit, total }
     );
   } catch (error) {
@@ -183,21 +223,50 @@ const getSaleProducts = async (req, res) => {
   }
 };
 
+
 const getAllSaleOccasions = async (req, res) => {
   try {
-    const sales = await SaleOccasion.find()
-      .populate({
-        path: "products.productId",
-        select: "name slug price mainImage category brand",
-      })
-      .sort({ startAt: -1 })
-      .lean();
+    const {
+      page = 1,
+      limit = 10,
+      search = "",
+    } = req.query;
+
+    const query = {};
+
+    if (search) {
+      query.$or = [
+        { name: { $regex: search, $options: "i" } },
+        { slug: { $regex: search, $options: "i" } },
+      ];
+    }
+
+    const skip = (page - 1) * limit;
+
+    const [sales, totalRecords] = await Promise.all([
+      SaleOccasion.find(query)
+        .populate({
+          path: "products.productId",
+          select: "name slug price mainImage category brand",
+        })
+        .sort({ startAt: -1 })
+        .skip(skip)
+        .limit(Number(limit))
+        .lean(),
+
+      SaleOccasion.countDocuments(query),
+    ]);
 
     return sendSuccessResponse(
       res,
       StatusCodes.OK,
       "Lấy danh sách tất cả đợt khuyến mãi thành công",
-      sales
+      {
+        sales,
+        totalRecords,
+        totalPages: Math.ceil(totalRecords / limit),
+        currentPage: Number(page),
+      }
     );
   } catch (error) {
     logError(error, req);
@@ -209,6 +278,7 @@ const getAllSaleOccasions = async (req, res) => {
     );
   }
 };
+
 
 
 const createSaleOccasion = async (req, res) => {
@@ -264,13 +334,29 @@ const createSaleOccasion = async (req, res) => {
       }
     }
 
-    // Create and save
+    const slug = createSlug(name);
+
+    const existingSale = await SaleOccasion.findOne({
+      slug,
+    });
+
+    if (existingSale) {
+      return sendErrorResponse(
+        res,
+        StatusCodes.BAD_REQUEST,
+        "Chương trình khuyến mãi đã tồn tại"
+      );
+    }
+
+    //  Create and save
     const saleOccasion = new SaleOccasion({
       name,
+      slug,
       startAt: startDate,
       endAt: endDate,
       products,
     });
+
     await saleOccasion.save();
 
     return sendCreatedResponse(
@@ -284,7 +370,7 @@ const createSaleOccasion = async (req, res) => {
     return sendErrorResponse(
       res,
       StatusCodes.INTERNAL_SERVER_ERROR,
-      "Lỗi hệ thống",
+      "Lỗi hệ thống hoặc sản phẩm khuyến mãi đã tồn tại ở đợt sale khác",
       error
     );
   }
@@ -293,9 +379,9 @@ const createSaleOccasion = async (req, res) => {
 const updateSaleOccasion = async (req, res) => {
   try {
     const { id } = req.params;
-    const { startAt, endAt, products } = req.body;
+    const { name, startAt, endAt, products } = req.body;
 
-    //  Validate sale ID
+    /* ========== VALIDATE ID ========== */
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return sendErrorResponse(
         res,
@@ -315,7 +401,7 @@ const updateSaleOccasion = async (req, res) => {
 
     const now = new Date();
 
-    //  Sale đã kết thúc → cấm sửa
+    /* ========== SALE ĐÃ KẾT THÚC ========== */
     if (now > sale.endAt) {
       return sendErrorResponse(
         res,
@@ -324,8 +410,12 @@ const updateSaleOccasion = async (req, res) => {
       );
     }
 
-    //  Sale đang diễn ra → cấm sửa startAt
-    if (now >= sale.startAt && startAt !== undefined) {
+    /* ========== SALE ĐANG DIỄN RA ========== */
+    if (
+      now >= sale.startAt &&
+      startAt !== undefined &&
+      new Date(startAt).getTime() !== sale.startAt.getTime()
+    ) {
       return sendErrorResponse(
         res,
         StatusCodes.BAD_REQUEST,
@@ -333,8 +423,9 @@ const updateSaleOccasion = async (req, res) => {
       );
     }
 
-    //  Body rỗng
+    /* ========== BODY RỖNG ========== */
     if (
+      name === undefined &&
       startAt === undefined &&
       endAt === undefined &&
       products === undefined
@@ -346,7 +437,7 @@ const updateSaleOccasion = async (req, res) => {
       );
     }
 
-    // 5️⃣ Validate & merge thời gian
+    /* ========== TIME ========== */
     const startDate = startAt ? new Date(startAt) : sale.startAt;
     const endDate = endAt ? new Date(endAt) : sale.endAt;
 
@@ -362,9 +453,11 @@ const updateSaleOccasion = async (req, res) => {
       );
     }
 
-    //  Update products (partial update)
+    /* ======================================================
+       ================= UPDATE PRODUCTS ====================
+       ====================================================== */
     if (products !== undefined) {
-      if (!Array.isArray(products) || products.length === 0) {
+      if (!Array.isArray(products)) {
         return sendErrorResponse(
           res,
           StatusCodes.BAD_REQUEST,
@@ -372,8 +465,27 @@ const updateSaleOccasion = async (req, res) => {
         );
       }
 
+      const oldProducts = sale.products;
+      const oldMap = new Map(
+        oldProducts.map(p => [p.productId.toString(), p])
+      );
+
+      const normalized = [];
+
       for (const item of products) {
-        const { productId, saleQuantity, salePercent } = item;
+        let { productId, saleQuantity, salePercent } = item;
+
+        if (!productId) {
+          return sendErrorResponse(
+            res,
+            StatusCodes.BAD_REQUEST,
+            "Thiếu productId"
+          );
+        }
+
+        if (typeof productId === "object") {
+          productId = productId._id || productId.value;
+        }
 
         if (!mongoose.Types.ObjectId.isValid(productId)) {
           return sendErrorResponse(
@@ -383,62 +495,103 @@ const updateSaleOccasion = async (req, res) => {
           );
         }
 
-        if (saleQuantity === undefined && salePercent === undefined) {
+        if (
+          saleQuantity !== undefined &&
+          (typeof saleQuantity !== "number" || saleQuantity < 0)
+        ) {
           return sendErrorResponse(
             res,
             StatusCodes.BAD_REQUEST,
-            "Phải có ít nhất saleQuantity hoặc salePercent"
+            "saleQuantity không hợp lệ"
           );
         }
 
-        if (saleQuantity !== undefined) {
-          if (typeof saleQuantity !== "number" || saleQuantity < 0) {
-            return sendErrorResponse(
-              res,
-              StatusCodes.BAD_REQUEST,
-              "saleQuantity không hợp lệ"
-            );
-          }
-        }
-
-        if (salePercent !== undefined) {
-          if (
-            typeof salePercent !== "number" ||
+        if (
+          salePercent !== undefined &&
+          (typeof salePercent !== "number" ||
             salePercent < 0 ||
-            salePercent > 100
-          ) {
-            return sendErrorResponse(
-              res,
-              StatusCodes.BAD_REQUEST,
-              "salePercent không hợp lệ"
-            );
-          }
-        }
-
-        const idx = sale.products.findIndex(
-          (p) => p.productId.toString() === productId
-        );
-
-        if (idx === -1) {
+            salePercent > 100)
+        ) {
           return sendErrorResponse(
             res,
             StatusCodes.BAD_REQUEST,
-            `Sản phẩm không tồn tại trong chương trình`
+            "salePercent không hợp lệ"
           );
         }
 
-        // chỉ update field được gửi
-        if (saleQuantity !== undefined) {
-          sale.products[idx].saleQuantity = saleQuantity;
-        }
+        normalized.push({
+          productId: productId.toString(),
+          saleQuantity,
+          salePercent,
+        });
+      }
 
-        if (salePercent !== undefined) {
-          sale.products[idx].salePercent = salePercent;
+      const newIds = normalized.map(p => p.productId);
+      const oldIds = [...oldMap.keys()];
+
+      const removedIds = oldIds.filter(id => !newIds.includes(id));
+
+      /* ===== ĐANG DIỄN RA: CẤM XÓA ===== */
+      if (now >= sale.startAt && now <= sale.endAt && removedIds.length > 0) {
+        return sendErrorResponse(
+          res,
+          StatusCodes.BAD_REQUEST,
+          "Không được xóa sản phẩm khi khuyến mãi đang diễn ra"
+        );
+      }
+
+
+      const nextProducts = [];
+
+      for (const item of normalized) {
+        const existed = oldMap.get(item.productId);
+
+        if (existed) {
+          // update
+          nextProducts.push({
+            productId: item.productId,
+            saleQuantity:
+              item.saleQuantity !== undefined
+                ? item.saleQuantity
+                : existed.saleQuantity,
+            salePercent:
+              item.salePercent !== undefined
+                ? item.salePercent
+                : existed.salePercent,
+          });
+        } else {
+          // add (chưa diễn ra hoặc đang diễn ra đều OK)
+          nextProducts.push(item);
         }
       }
+
+      sale.products = nextProducts;
     }
 
-    // Gán thời gian
+    /* ========== UPDATE NAME ========== */
+    if (name !== undefined) {
+      const newSlug = createSlug(name);
+
+      if (newSlug !== sale.slug) {
+        const existed = await SaleOccasion.findOne({
+          slug: newSlug,
+          _id: { $ne: sale._id },
+        });
+
+        if (existed) {
+          return sendErrorResponse(
+            res,
+            StatusCodes.BAD_REQUEST,
+            "Tên chương trình khuyến mãi đã tồn tại"
+          );
+        }
+
+        sale.slug = newSlug;
+      }
+
+      sale.name = name;
+    }
+
     if (startAt !== undefined) sale.startAt = startDate;
     if (endAt !== undefined) sale.endAt = endDate;
 
@@ -460,6 +613,8 @@ const updateSaleOccasion = async (req, res) => {
     );
   }
 };
+
+
 
 const deleteSaleOccasion = async (req, res) => {
   try {
@@ -522,10 +677,127 @@ const deleteSaleOccasion = async (req, res) => {
   }
 };
 
+const getAllActiveSaleProducts = async (req, res) => {
+  try {
+    const { time, category } = req.query;
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const limit = Math.max(parseInt(req.query.limit, 10) || 10, 1);
+
+    if (!time) {
+      return sendErrorResponse(
+        res,
+        StatusCodes.BAD_REQUEST,
+        "Thiếu tham số thời gian"
+      );
+    }
+
+    const targetDate = new Date(time);
+    if (isNaN(targetDate.getTime())) {
+      return sendErrorResponse(
+        res,
+        StatusCodes.BAD_REQUEST,
+        "Tham số thời gian không hợp lệ"
+      );
+    }
+
+    //  Lấy TẤT CẢ sale đang diễn ra
+    const sales = await SaleOccasion.find({
+      startAt: { $lte: targetDate },
+      endAt: { $gte: targetDate },
+    })
+      .sort({ startAt: -1 }) // sale gần nhất ưu tiên
+      .lean();
+
+    if (sales.length === 0) {
+      return sendSuccessResponse(
+        res,
+        StatusCodes.OK,
+        "Không có khuyến mãi nào",
+        { sale: null, products: [] },
+        { page, limit, total: 0 }
+      );
+    }
+
+    //  Map productId → sale info (sale gần nhất thắng)
+    const saleMap = new Map();
+
+    for (const sale of sales) {
+      for (const item of sale.products) {
+        const key = item.productId.toString();
+        if (!saleMap.has(key)) {
+          saleMap.set(key, {
+            salePercent: item.salePercent,
+            saleQuantity: item.saleQuantity,
+            saleName: sale.name,
+            saleSlug: sale.slug,
+            startAt: sale.startAt,
+            endAt: sale.endAt,
+          });
+        }
+      }
+    }
+
+    const productIds = [...saleMap.keys()].map(
+      (id) => new mongoose.Types.ObjectId(id)
+    );
+
+    const filter = {
+      _id: { $in: productIds },
+      isDelete: { $ne: true },
+    };
+
+    if (category && mongoose.Types.ObjectId.isValid(category)) {
+      filter.category = new mongoose.Types.ObjectId(category);
+    }
+
+    const total = await Product.countDocuments(filter);
+
+    const products = await Product.find(filter)
+      .select("name slug mainImage price category brand")
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .lean();
+
+    const productData = products.map((prod) => {
+      const saleInfo = saleMap.get(prod._id.toString());
+      return {
+        productId: prod._id,
+        name: prod.name,
+        slug: prod.slug,
+        mainImage: prod.mainImage,
+        price: prod.price,
+        category: prod.category,
+        brand: prod.brand,
+        ...saleInfo,
+      };
+    });
+
+    return sendSuccessResponse(
+      res,
+      StatusCodes.OK,
+      "Lấy tất cả sản phẩm khuyến mãi thành công",
+      {
+        sale: { slug: "all", name: "Tất cả khuyến mãi" },
+        products: productData,
+      },
+      { page, limit, total }
+    );
+  } catch (error) {
+    logError(error, req);
+    return sendErrorResponse(
+      res,
+      StatusCodes.INTERNAL_SERVER_ERROR,
+      "Lỗi hệ thống",
+      error
+    );
+  }
+};
+
 
 
 
 export default {
+  getAllActiveSaleProducts,
   getSaleProducts,
   getAllSaleOccasions,
   createSaleOccasion,
