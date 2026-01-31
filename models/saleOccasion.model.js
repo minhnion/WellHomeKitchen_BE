@@ -33,6 +33,12 @@ const saleOccasionSchema = new Schema(
       unique: true,
       index: true,
     },
+    slug: {
+      type: String,
+      required: [true, "Product slug is required"],
+      unique: true,
+      trim: true,
+    },
     startAt: {
       type: Date,
       required: true,

@@ -5,6 +5,7 @@ import { authenticate, authorizeRoles } from "../middlewares/auth.middleware.js"
 const router = express.Router();
 
 router.get("/products", saleOccasionController.getSaleProducts);
+router.get("/products/all", saleOccasionController.getAllActiveSaleProducts);
 router.get("/categories", saleOccasionController.getSaleCategories);
 router.post("/", authenticate,
     authorizeRoles("product-manager", "admin"),
