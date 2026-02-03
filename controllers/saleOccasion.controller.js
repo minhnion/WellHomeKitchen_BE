@@ -381,7 +381,7 @@ const updateSaleOccasion = async (req, res) => {
     const { id } = req.params;
     const { name, startAt, endAt, products } = req.body;
 
-    /* ========== VALIDATE ID ========== */
+    /* ========= VALIDATE ID ========= */
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return sendErrorResponse(
         res,
@@ -401,7 +401,7 @@ const updateSaleOccasion = async (req, res) => {
 
     const now = new Date();
 
-    /* ========== SALE ĐÃ KẾT THÚC ========== */
+    /* ========= SALE ĐÃ KẾT THÚC ========= */
     if (now > sale.endAt) {
       return sendErrorResponse(
         res,
@@ -410,7 +410,7 @@ const updateSaleOccasion = async (req, res) => {
       );
     }
 
-    /* ========== SALE ĐANG DIỄN RA ========== */
+    /* ========= SALE ĐANG DIỄN RA: CẤM ĐỔI START ========= */
     if (
       now >= sale.startAt &&
       startAt !== undefined &&
@@ -423,7 +423,7 @@ const updateSaleOccasion = async (req, res) => {
       );
     }
 
-    /* ========== BODY RỖNG ========== */
+    /* ========= BODY RỖNG ========= */
     if (
       name === undefined &&
       startAt === undefined &&
@@ -437,7 +437,7 @@ const updateSaleOccasion = async (req, res) => {
       );
     }
 
-    /* ========== TIME ========== */
+    /* ========= TIME ========= */
     const startDate = startAt ? new Date(startAt) : sale.startAt;
     const endDate = endAt ? new Date(endAt) : sale.endAt;
 
@@ -453,9 +453,9 @@ const updateSaleOccasion = async (req, res) => {
       );
     }
 
-    /* ======================================================
-       ================= UPDATE PRODUCTS ====================
-       ====================================================== */
+    /* =====================================================
+       ================= UPDATE PRODUCTS ===================
+       ===================================================== */
     if (products !== undefined) {
       if (!Array.isArray(products)) {
         return sendErrorResponse(
@@ -465,12 +465,7 @@ const updateSaleOccasion = async (req, res) => {
         );
       }
 
-      const oldProducts = sale.products;
-      const oldMap = new Map(
-        oldProducts.map(p => [p.productId.toString(), p])
-      );
-
-      const normalized = [];
+      const normalizedProducts = [];
 
       for (const item of products) {
         let { productId, saleQuantity, salePercent } = item;
@@ -519,56 +514,47 @@ const updateSaleOccasion = async (req, res) => {
           );
         }
 
-        normalized.push({
+        normalizedProducts.push({
           productId: productId.toString(),
           saleQuantity,
           salePercent,
         });
       }
 
-      const newIds = normalized.map(p => p.productId);
-      const oldIds = [...oldMap.keys()];
+      /* =====  TRÙNG SẢN PHẨM TRONG CHÍNH REQUEST ===== */
+      const productIds = normalizedProducts.map(p => p.productId);
+      const duplicated = productIds.filter(
+        (id, index) => productIds.indexOf(id) !== index
+      );
 
-      const removedIds = oldIds.filter(id => !newIds.includes(id));
-
-      /* ===== ĐANG DIỄN RA: CẤM XÓA ===== */
-      if (now >= sale.startAt && now <= sale.endAt && removedIds.length > 0) {
+      if (duplicated.length > 0) {
         return sendErrorResponse(
           res,
           StatusCodes.BAD_REQUEST,
-          "Không được xóa sản phẩm khi khuyến mãi đang diễn ra"
+          "Sản phẩm bị trùng trong cùng một đợt khuyến mãi"
         );
       }
 
+      /* ===== 2️ TRÙNG VỚI ĐỢT SALE KHÁC (OVERLAP TIME) ===== */
+      const conflictSale = await SaleOccasion.findOne({
+        _id: { $ne: sale._id },
+        startAt: { $lt: endDate },
+        endAt: { $gt: startDate },
+        "products.productId": { $in: productIds },
+      });
 
-      const nextProducts = [];
-
-      for (const item of normalized) {
-        const existed = oldMap.get(item.productId);
-
-        if (existed) {
-          // update
-          nextProducts.push({
-            productId: item.productId,
-            saleQuantity:
-              item.saleQuantity !== undefined
-                ? item.saleQuantity
-                : existed.saleQuantity,
-            salePercent:
-              item.salePercent !== undefined
-                ? item.salePercent
-                : existed.salePercent,
-          });
-        } else {
-          // add (chưa diễn ra hoặc đang diễn ra đều OK)
-          nextProducts.push(item);
-        }
+      if (conflictSale) {
+        return sendErrorResponse(
+          res,
+          StatusCodes.BAD_REQUEST,
+          "Một hoặc nhiều sản phẩm đã tồn tại trong đợt khuyến mãi khác cùng thời gian"
+        );
       }
 
-      sale.products = nextProducts;
+      sale.products = normalizedProducts;
     }
 
-    /* ========== UPDATE NAME ========== */
+    /* ========= UPDATE NAME ========= */
     if (name !== undefined) {
       const newSlug = createSlug(name);
 
@@ -608,11 +594,13 @@ const updateSaleOccasion = async (req, res) => {
     return sendErrorResponse(
       res,
       StatusCodes.INTERNAL_SERVER_ERROR,
-      "Lỗi hệ thống",
+      "Lỗi hệ thống hoặc sản phẩm khuyến mãi chưa được thay đổi giá bán so với giá ban đầu",
       error
     );
   }
 };
+
+
 
 
 
@@ -639,15 +627,6 @@ const deleteSaleOccasion = async (req, res) => {
     }
 
     const now = new Date();
-
-    //  Đang diễn ra → cấm xoá
-    if (now >= sale.startAt && now <= sale.endAt) {
-      return sendErrorResponse(
-        res,
-        StatusCodes.BAD_REQUEST,
-        "Không thể xoá chương trình khuyến mãi đang diễn ra"
-      );
-    }
 
     //  Đã kết thúc → cấm xoá
     if (now > sale.endAt) {
