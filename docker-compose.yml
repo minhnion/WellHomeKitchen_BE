@@ -1,0 +1,9 @@
+version: '3.8'
+services:
+  be:
+    build: .
+    container_name: wellhomekitchen-be
+    env_file: .env
+    ports:
+      - "4000:4000"
+    restart: unless-stopped

@@ -6,7 +6,7 @@ WORKDIR /app
 
 # ===== Copy package files first (for better cache) =====
 COPY package.json ./
-RUN npm install --omit=dev
+RUN npm install 
 
 # ===== Copy source code =====
 COPY . .
