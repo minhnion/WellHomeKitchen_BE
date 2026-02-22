@@ -1,5 +1,28 @@
+# version: '3.8'
+# services:
+#   be:
+#     build: .
+#     container_name: wellhomekitchen-be
+#     env_file: .env
+#     ports:
+#       - "4000:4000"
+#     restart: unless-stopped
+
 version: '3.8'
+
 services:
+  mongodb:
+    image: mongo:6
+    container_name: wellhomekitchen-mongodb
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: StrongPass2024
+      MONGO_INITDB_DATABASE: kitchen-care-pro
+    volumes:
+      - mongodb_data:/data/db
+      - /home/Bep_An_Phu/mongodb_backup:/backup
+
   be:
     build: .
     container_name: wellhomekitchen-be
@@ -7,3 +30,9 @@ services:
     ports:
       - "4000:4000"
     restart: unless-stopped
+    depends_on:
+      - mongodb
+
+volumes:
+  mongodb_data:
+    driver: local
